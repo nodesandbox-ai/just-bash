@@ -66,7 +66,7 @@ import {
   handleUnquotedSimplePositional,
   handleUnquotedVarNamePrefix,
 } from "./unquoted-expansion.js";
-import { getArrayElements } from "./variable.js";
+import { getArrayElements, getVariable, isVariableSet } from "./variable.js";
 
 /**
  * Dependencies injected to avoid circular imports
@@ -141,6 +141,14 @@ export async function expandWordWithGlobImpl(
     return handleBraceExpansionResults(ctx, braceExpanded, hasQuoted);
   }
 
+  // Unquoted ${x+"$@"} / ${x-"${a[@]}"} - the operand word keeps its fields
+  {
+    const operandWord = await getWordProducingOperand(ctx, wordParts);
+    if (operandWord !== null) {
+      return expandWordWithGlobImpl(ctx, operandWord, deps);
+    }
+  }
+
   // Handle array expansion special cases
   const arrayResult = await handleArrayExpansionCases(
     ctx,
@@ -210,6 +218,59 @@ export async function expandWordWithGlobImpl(
     hasQuoted,
     deps.expandWordForGlobbing,
   );
+}
+
+/**
+ * For an unquoted ${x+word} / ${x-word} / ${x:+word} / ${x:-word} whose operand
+ * word contains a quoted "$@" or "${a[@]}", return the operand word when it
+ * applies, so it is expanded as a full word. Bash expands the operand with its
+ * own field boundaries, so ${1+"$@"} is equivalent to "$@" (a common
+ * portability idiom in shell wrappers). Returns null when the idiom does not
+ * match or the operand does not apply.
+ */
+async function getWordProducingOperand(
+  ctx: InterpreterContext,
+  wordParts: WordPart[],
+): Promise<WordNode | null> {
+  if (wordParts.length !== 1 || wordParts[0].type !== "ParameterExpansion") {
+    return null;
+  }
+  const part = wordParts[0];
+  const op = part.operation;
+  if (
+    !op ||
+    (op.type !== "UseAlternative" && op.type !== "DefaultValue") ||
+    !op.word
+  ) {
+    return null;
+  }
+
+  const hasQuotedMultiField = op.word.parts.some(
+    (p) =>
+      p.type === "DoubleQuoted" &&
+      p.parts.some(
+        (inner) =>
+          inner.type === "ParameterExpansion" &&
+          !inner.operation &&
+          (inner.parameter === "@" || /\[@\]$/.test(inner.parameter)),
+      ),
+  );
+  // Unquoted literal text with whitespace (${x-"$@" y}) needs IFS splitting of
+  // the literal, which full-word expansion does not do; leave that to the
+  // generic path.
+  const hasSplittableLiteral = op.word.parts.some(
+    (p) => p.type === "Literal" && /\s/.test(p.value),
+  );
+  if (!hasQuotedMultiField || hasSplittableLiteral) {
+    return null;
+  }
+
+  const isSet = await isVariableSet(ctx, part.parameter);
+  const isEmpty =
+    op.checkEmpty && (await getVariable(ctx, part.parameter)) === "";
+  const useOperand =
+    op.type === "UseAlternative" ? isSet && !isEmpty : !isSet || isEmpty;
+  return useOperand ? op.word : null;
 }
 
 /**
