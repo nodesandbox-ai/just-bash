@@ -297,6 +297,20 @@ export async function handleType(
  * }
  */
 function formatFunctionSource(name: string, funcDef: FunctionDefNode): string {
+  return `${name} is a function\n${formatFunctionDefinition(name, funcDef)}`;
+}
+
+/**
+ * Format a function definition the way `declare -f NAME` prints it:
+ * f ()
+ * {
+ *     echo
+ * }
+ */
+export function formatFunctionDefinition(
+  name: string,
+  funcDef: FunctionDefNode,
+): string {
   // For function bodies that are Group nodes, unwrap them since we add { } ourselves
   let bodyStr: string;
   if (funcDef.body.type === "Group") {
@@ -305,7 +319,7 @@ function formatFunctionSource(name: string, funcDef: FunctionDefNode): string {
   } else {
     bodyStr = serializeCompoundCommand(funcDef.body);
   }
-  return `${name} is a function\n${name} () \n{ \n    ${bodyStr}\n}\n`;
+  return `${name} () \n{ \n    ${bodyStr}\n}\n`;
 }
 
 /**

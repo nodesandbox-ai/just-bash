@@ -88,6 +88,15 @@ function splitPatternOperand(value: string): string[] {
 }
 
 /**
+ * Exchange NUL and newline. `-z` searches NUL-terminated records, so the
+ * content is swapped before the line-based search and the line output is
+ * swapped back, which also restores newlines inside a record.
+ */
+function swapNulAndNewline(text: string): string {
+  return text.replace(/[\0\n]/g, (c) => (c === "\0" ? "\n" : "\0"));
+}
+
+/**
  * Split the contents of a `-f FILE` pattern file into individual patterns.
  *
  * Unlike `-e`, the final newline of a pattern file is a terminator rather than
@@ -153,6 +162,7 @@ const grepHelp = {
     "-L, --files-without-match print names of files with no matches",
     "-m NUM, --max-count=NUM  stop after NUM matches",
     "-n, --line-number        print line number with output lines",
+    "-H, --with-filename      print the file name for each match",
     "-h, --no-filename        suppress the file name prefix on output",
     "-o, --only-matching      show only nonempty parts of lines that match",
     "-q, --quiet, --silent    suppress all normal output",
@@ -160,7 +170,9 @@ const grepHelp = {
     "-A NUM                   print NUM lines of trailing context",
     "-B NUM                   print NUM lines of leading context",
     "-C NUM                   print NUM lines of context",
-    "-e PATTERN               use PATTERN for matching",
+    "-e, --regexp=PATTERN     use PATTERN for matching (repeatable)",
+    "-z, --null-data          lines are terminated by NUL, not newline",
+    "    --color[=WHEN]       accepted; output is never colored",
     "-f FILE, --file=FILE     obtain patterns from FILE, one per line",
     "    --include=GLOB       search only files matching GLOB",
     "    --exclude=GLOB       skip files matching GLOB",
@@ -190,6 +202,8 @@ export const grepCommand: RuntimeCommand = {
     let fixedStrings = false;
     let onlyMatching = false;
     let noFilename = false;
+    let withFilename = false;
+    let nullData = false;
     let quietMode = false;
     let maxCount = 0; // 0 means unlimited
     let beforeContext = 0;
@@ -197,7 +211,8 @@ export const grepCommand: RuntimeCommand = {
     const includePatterns: string[] = [];
     const excludePatterns: string[] = [];
     const excludeDirPatterns: string[] = [];
-    let pattern: string | null = null;
+    /** PATTERNS given to -e/--regexp, in argument order; all OR-combine. */
+    const regexpPatterns: string[] = [];
     /** Paths given to -f/--file, in argument order. "-" means stdin. */
     const patternFiles: string[] = [];
     const operands: string[] = [];
@@ -217,8 +232,22 @@ export const grepCommand: RuntimeCommand = {
       }
 
       if (parseOptions && arg.startsWith("-") && arg !== "-") {
-        if (arg === "-e" && i + 1 < args.length) {
-          pattern = args[++i];
+        if ((arg === "-e" || arg === "--regexp") && i + 1 < args.length) {
+          regexpPatterns.push(args[++i]);
+          continue;
+        }
+        if (arg.startsWith("--regexp=")) {
+          regexpPatterns.push(arg.slice("--regexp=".length));
+          continue;
+        }
+
+        // Output is never a terminal here, so color is always off.
+        if (
+          arg === "--color" ||
+          arg === "--colour" ||
+          arg.startsWith("--color=") ||
+          arg.startsWith("--colour=")
+        ) {
           continue;
         }
 
@@ -315,6 +344,22 @@ export const grepCommand: RuntimeCommand = {
             }
             break;
           }
+          if (flag === "e") {
+            // `-eX` / `-ieX` attach the pattern; `-ie X` takes the next arg.
+            const attached = flags.slice(f + 1).join("");
+            if (attached.length > 0) {
+              regexpPatterns.push(attached);
+            } else if (i + 1 < args.length) {
+              regexpPatterns.push(args[++i]);
+            } else {
+              return {
+                stdout: "",
+                stderr: "grep: option requires an argument -- 'e'\n",
+                exitCode: 2,
+              };
+            }
+            break;
+          }
           if (flag === "i" || flag === "--ignore-case") ignoreCase = true;
           else if (flag === "n" || flag === "--line-number")
             showLineNumbers = true;
@@ -336,7 +381,13 @@ export const grepCommand: RuntimeCommand = {
             fixedStrings = true;
           else if (flag === "o" || flag === "--only-matching")
             onlyMatching = true;
-          else if (flag === "h" || flag === "--no-filename") noFilename = true;
+          else if (flag === "h" || flag === "--no-filename") {
+            noFilename = true;
+            withFilename = false;
+          } else if (flag === "H" || flag === "--with-filename") {
+            withFilename = true;
+            noFilename = false;
+          } else if (flag === "z" || flag === "--null-data") nullData = true;
           else if (flag === "q" || flag === "--quiet" || flag === "--silent")
             quietMode = true;
           else if (flag.startsWith("--")) {
@@ -351,22 +402,22 @@ export const grepCommand: RuntimeCommand = {
     }
 
     // The first operand is the pattern only when no -e/-f pattern was given.
-    if (pattern === null && patternFiles.length === 0) {
-      pattern = operands.shift() ?? null;
-      if (pattern === null) {
+    if (regexpPatterns.length === 0 && patternFiles.length === 0) {
+      const operand = operands.shift();
+      if (operand === undefined) {
         return {
           stdout: "",
           stderr: "grep: missing pattern\n",
           exitCode: 2,
         };
       }
+      regexpPatterns.push(operand);
     }
     const files = operands;
 
     // Collect patterns: -e/positional first, then each -f file in order.
     // All of them OR-combine, exactly like GNU grep.
-    const patterns: string[] =
-      pattern === null ? [] : splitPatternOperand(pattern);
+    const patterns: string[] = regexpPatterns.flatMap(splitPatternOperand);
     /** True once `-f -` has drained stdin, so it can't also be searched. */
     let stdinUsedForPatterns = false;
     for (const patternFile of patternFiles) {
@@ -492,13 +543,19 @@ export const grepCommand: RuntimeCommand = {
     // If no files and stdin is provided (including empty string), read from
     // stdin. grep runs regex over text — decode bytes to UTF-8 so multibyte
     // codepoints match `.` / character classes correctly.
+    const toRecords = (text: string): string =>
+      nullData ? swapNulAndNewline(text) : text;
+    // Count lines keep their newline under -z, as in GNU grep.
+    const fromRecords = (output: string): string =>
+      nullData && !countOnly ? swapNulAndNewline(output) : output;
+
     if (files.length === 0 && ctx.stdin !== undefined) {
       const input = stdinUsedForPatterns ? "" : decodeBytesToUtf8(ctx.stdin);
-      const result = searchContent(input, regex, {
+      const result = searchContent(toRecords(input), regex, {
         invertMatch,
         showLineNumbers,
         countOnly,
-        filename: "",
+        filename: withFilename ? "(standard input)" : "",
         onlyMatching,
         beforeContext,
         afterContext,
@@ -514,7 +571,7 @@ export const grepCommand: RuntimeCommand = {
       }
       // grep emits text; the pipeline handles encoding.
       return {
-        stdout: result.output,
+        stdout: fromRecords(result.output),
         stderr: "",
         exitCode: result.matched ? 0 : 1,
       };
@@ -630,7 +687,9 @@ export const grepCommand: RuntimeCommand = {
 
     // Determine if we should show filename (after glob expansion)
     const showFilename =
-      (filesToSearch.length > 1 || (recursive && hasFileTarget)) && !noFilename;
+      withFilename ||
+      ((filesToSearch.length > 1 || (recursive && hasFileTarget)) &&
+        !noFilename);
 
     // Process files in parallel batches for better performance
     const BATCH_SIZE = 50;
@@ -722,7 +781,7 @@ export const grepCommand: RuntimeCommand = {
               }
             }
 
-            const result = searchContent(content, regex, {
+            const result = searchContent(toRecords(content), regex, {
               invertMatch,
               showLineNumbers,
               countOnly,
@@ -770,7 +829,7 @@ export const grepCommand: RuntimeCommand = {
           if (filesWithMatches) {
             stdout += `${file}\n`;
           } else if (!filesWithoutMatch) {
-            stdout += result.output;
+            stdout += fromRecords(result.output);
           }
         } else {
           // No match in this file

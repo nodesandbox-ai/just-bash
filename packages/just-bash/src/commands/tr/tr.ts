@@ -38,7 +38,8 @@ const trHelp = {
   [:graph:]   all printable characters except space
   [:cntrl:]   all control characters
   [:xdigit:]  all hexadecimal digits
-  \\n, \\t, \\r  escape sequences`,
+  \\n, \\t, \\r  escape sequences (also \\a, \\b, \\f, \\v)
+  \\NNN        character with octal value NNN (\\0 is NUL)`,
 };
 
 // POSIX character class definitions (Map prevents prototype pollution)
@@ -117,15 +118,23 @@ function expandRange(
     // Handle escape sequences
     if (set[i] === "\\" && i + 1 < set.length) {
       const next = set[i + 1];
-      if (next === "n") {
-        append("\n");
-      } else if (next === "t") {
-        append("\t");
-      } else if (next === "r") {
-        append("\r");
-      } else {
-        append(next);
+      // \NNN: one to three octal digits (\0 is NUL)
+      const octal = set.slice(i + 1, i + 4).match(/^[0-7]{1,3}/);
+      if (octal) {
+        append(String.fromCharCode(Number.parseInt(octal[0], 8) & 0xff));
+        i += 1 + octal[0].length;
+        continue;
       }
+      const simple: Record<string, string> = {
+        n: "\n",
+        t: "\t",
+        r: "\r",
+        a: "\x07",
+        b: "\b",
+        f: "\f",
+        v: "\v",
+      };
+      append(simple[next] ?? next);
       i += 2;
       continue;
     }

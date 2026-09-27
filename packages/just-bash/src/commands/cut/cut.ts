@@ -18,6 +18,7 @@ const cutHelp = {
     "-d DELIM             use DELIM instead of TAB for field delimiter",
     "-f LIST              select only these fields",
     "-s, --only-delimited  do not print lines without delimiters",
+    "    --complement     select everything except the given LIST",
     "    --help           display this help and exit",
   ],
 };
@@ -64,23 +65,25 @@ function parseRange(spec: string, maximum: number): CutRange[] {
   return ranges;
 }
 
-function extractByRanges(items: string[], ranges: CutRange[]): string[] {
-  const result: string[] = [];
-  const selectedIndices = new Set<number>();
-
+/**
+ * Pick the items selected by the ranges (or, with complement, the items not
+ * selected). Like GNU cut, output keeps input order and never repeats an item,
+ * whatever order or overlap the ranges have.
+ */
+function selectByRanges<T>(
+  items: T[],
+  ranges: CutRange[],
+  complement: boolean,
+): T[] {
+  const selected = new Uint8Array(items.length);
   for (const range of ranges) {
     const start = range.start - 1; // Convert to 0-indexed
     const end = range.end === null ? items.length : range.end;
-
-    for (let i = start; i < end && i < items.length; i++) {
-      if (i >= 0 && !selectedIndices.has(i)) {
-        selectedIndices.add(i);
-        result.push(items[i]);
-      }
+    for (let i = Math.max(0, start); i < end && i < items.length; i++) {
+      selected[i] = 1;
     }
   }
-
-  return result;
+  return items.filter((_, i) => (selected[i] === 1) !== complement);
 }
 
 export const cutCommand: RuntimeCommand = {
@@ -97,6 +100,7 @@ export const cutCommand: RuntimeCommand = {
     let fieldSpec: string | null = null;
     let charSpec: string | null = null;
     let suppressNoDelim = false;
+    let complement = false;
     const files: string[] = [];
 
     // Parse arguments
@@ -116,6 +120,8 @@ export const cutCommand: RuntimeCommand = {
         charSpec = arg.slice(2);
       } else if (arg === "-s" || arg === "--only-delimited") {
         suppressNoDelim = true;
+      } else if (arg === "--complement") {
+        complement = true;
       } else if (arg.startsWith("--")) {
         return unknownOption("cut", arg);
       } else if (arg.startsWith("-")) {
@@ -191,17 +197,12 @@ export const cutCommand: RuntimeCommand = {
         // codepoints — `Array.from` splits on Unicode code points so emoji
         // and CJK chars count as one position each.
         const chars = Array.from(line);
-        const selected: string[] = [];
         for (const range of ranges) {
           const start = range.start - 1;
           const end = range.end === null ? chars.length : range.end;
           chargeRangeWork(Math.max(0, Math.min(end, chars.length) - start));
-          for (let i = start; i < end && i < chars.length; i++) {
-            if (i >= 0) {
-              selected.push(chars[i]);
-            }
-          }
         }
+        const selected = selectByRanges(chars, ranges, complement);
         output.append(`${selected.join("")}\n`);
       } else {
         // Field mode
@@ -215,7 +216,7 @@ export const cutCommand: RuntimeCommand = {
           const end = range.end === null ? fields.length : range.end;
           chargeRangeWork(Math.max(0, Math.min(end, fields.length) - start));
         }
-        const selected = extractByRanges(fields, ranges);
+        const selected = selectByRanges(fields, ranges, complement);
         output.append(`${selected.join(delimiter)}\n`);
       }
     }
@@ -247,6 +248,7 @@ export const flagsForFuzzing: CommandFuzzInfo = {
     { flag: "-f", type: "value", valueHint: "string" },
     { flag: "-c", type: "value", valueHint: "string" },
     { flag: "-s", type: "boolean" },
+    { flag: "--complement", type: "boolean" },
   ],
   stdinType: "text",
   needsFiles: true,

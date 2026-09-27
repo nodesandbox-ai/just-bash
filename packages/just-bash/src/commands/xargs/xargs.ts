@@ -16,10 +16,12 @@ const xargsHelp = {
   summary: "build and execute command lines from standard input",
   usage: "xargs [OPTION]... [COMMAND [INITIAL-ARGS]]",
   options: [
-    "-I REPLACE   replace occurrences of REPLACE with input",
-    "-d DELIM     use DELIM as input delimiter (e.g., -d '\\n' for newline)",
-    "-n NUM       use at most NUM arguments per command line",
-    "-P NUM       run at most NUM processes at a time",
+    "-I REPLACE, --replace=REPLACE  replace occurrences of REPLACE with input",
+    "-i           same as -I {}",
+    "-d DELIM, --delimiter=DELIM  use DELIM as input delimiter (e.g., -d '\\n' for newline)",
+    "-n NUM, --max-args=NUM  use at most NUM arguments per command line",
+    "-P NUM, --max-procs=NUM  run at most NUM processes at a time",
+    "             (option values may also be attached: -I{}, -n1)",
     "-0, --null   items are separated by null, not whitespace",
     "-t, --verbose  print commands before executing",
     "-r, --no-run-if-empty  do not run command if input is empty",
@@ -95,15 +97,36 @@ export const xargsCommand: RuntimeCommand = {
     let noRunIfEmpty = false;
     let commandStart = 0;
 
+    // Option values may be attached (`-I{}`, `-n1`) or given in long form
+    // (`--max-args=1`); split those into the separate-argument form. Only
+    // options are rewritten, never the command that follows them.
+    const argv = args.slice();
+    const longValueOptions = new Map([
+      ["replace", "-I"],
+      ["delimiter", "-d"],
+      ["max-args", "-n"],
+      ["max-procs", "-P"],
+    ]);
+
     // Parse xargs options
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === "-I" && i + 1 < args.length) {
-        replaceStr = args[++i];
+    for (let i = 0; i < argv.length; i++) {
+      const attached = /^-([IdnP])([\s\S]+)$/.exec(argv[i]);
+      const long = /^--([a-z-]+)=([\s\S]*)$/.exec(argv[i]);
+      if (attached) {
+        argv.splice(i, 1, `-${attached[1]}`, attached[2]);
+      } else if (long && longValueOptions.has(long[1])) {
+        argv.splice(i, 1, longValueOptions.get(long[1]) as string, long[2]);
+      } else if (argv[i] === "-i" || argv[i] === "--replace") {
+        // GNU: -i / --replace with no value is -I {}
+        argv.splice(i, 1, "-I", "{}");
+      }
+      const arg = argv[i];
+      if (arg === "-I" && i + 1 < argv.length) {
+        replaceStr = argv[++i];
         commandStart = i + 1;
-      } else if (arg === "-d" && i + 1 < args.length) {
+      } else if (arg === "-d" && i + 1 < argv.length) {
         // Parse delimiter - handle escape sequences like \n, \t
-        const delimArg = args[++i];
+        const delimArg = argv[++i];
         delimiter = delimArg
           .replace(/\\n/g, "\n")
           .replace(/\\t/g, "\t")
@@ -111,8 +134,8 @@ export const xargsCommand: RuntimeCommand = {
           .replace(/\\0/g, "\0")
           .replace(/\\\\/g, "\\");
         commandStart = i + 1;
-      } else if (arg === "-n" && i + 1 < args.length) {
-        const value = args[++i];
+      } else if (arg === "-n" && i + 1 < argv.length) {
+        const value = argv[++i];
         const parsedNumber = Number(value);
         if (
           !/^\d+$/.test(value) ||
@@ -127,8 +150,8 @@ export const xargsCommand: RuntimeCommand = {
         }
         maxArgs = parsedNumber;
         commandStart = i + 1;
-      } else if (arg === "-P" && i + 1 < args.length) {
-        const value = args[++i];
+      } else if (arg === "-P" && i + 1 < argv.length) {
+        const value = argv[++i];
         const parsedNumber = Number(value);
         if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsedNumber)) {
           return {
@@ -169,7 +192,7 @@ export const xargsCommand: RuntimeCommand = {
     }
 
     // Get command and initial args
-    const command = args.slice(commandStart);
+    const command = argv.slice(commandStart);
     if (command.length === 0) {
       command.push("echo");
     }

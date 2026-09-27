@@ -27,6 +27,7 @@ import {
   AwkInterpreter,
   createRuntimeContext,
 } from "./interpreter/index.js";
+import { setVariable } from "./interpreter/variables.js";
 import { AwkParser } from "./parser2.js";
 
 const awkHelp = {
@@ -77,13 +78,23 @@ export const awkCommand2: RuntimeCommand = {
         fieldSepStr = processEscapes(arg.slice(2));
         fieldSep = createFieldSepRegex(fieldSepStr);
         programIdx = i + 1;
-      } else if (arg === "-v" && i + 1 < args.length) {
-        const assignment = args[++i];
+      } else if (
+        (arg === "-v" && i + 1 < args.length) ||
+        (arg.startsWith("-v") && arg.length > 2)
+      ) {
+        // `-v NAME=VALUE` or the attached form `-vNAME=VALUE`
+        const assignment = arg === "-v" ? args[++i] : arg.slice(2);
         const eqIdx = assignment.indexOf("=");
         if (eqIdx > 0) {
           const varName = assignment.slice(0, eqIdx);
           const varValue = processEscapes(assignment.slice(eqIdx + 1));
-          vars[varName] = varValue;
+          if (varName === "FS") {
+            // Same as -F, so a single character like `|` stays literal.
+            fieldSepStr = varValue;
+            fieldSep = createFieldSepRegex(fieldSepStr);
+          } else {
+            vars[varName] = varValue;
+          }
         }
         programIdx = i + 1;
       } else if (arg.startsWith("--")) {
@@ -172,8 +183,12 @@ export const awkCommand2: RuntimeCommand = {
       requireDefenseContext: ctx.requireDefenseContext,
     });
     runtimeCtx.FS = fieldSepStr;
-    // Use Object.assign with null-prototype to preserve safety
-    runtimeCtx.vars = Object.assign(Object.create(null), vars);
+    // Null-prototype to preserve safety. -v goes through setVariable so
+    // built-ins like OFS and ORS take effect instead of being shadowed.
+    runtimeCtx.vars = Object.create(null);
+    for (const [name, value] of Object.entries(vars)) {
+      setVariable(runtimeCtx, name, value);
+    }
 
     // Set up ARGC/ARGV
     // ARGV[0] is "awk", ARGV[1..n] are the input files
@@ -368,6 +383,12 @@ function createFieldSepRegex(
 ): import("../../regex/index.js").UserRegex {
   if (sep === " ") {
     return createUserRegex("\\s+");
+  }
+
+  // POSIX: any other single character is a literal separator, so `-F'|'`
+  // splits on `|` rather than compiling an empty alternation.
+  if (sep.length === 1) {
+    return createUserRegex(escapeForRegex(sep));
   }
 
   const regexMetachars = /[[\](){}.*+?^$|\\]/;

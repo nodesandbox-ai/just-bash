@@ -47,6 +47,7 @@ import {
   unmarkExported,
 } from "../helpers/readonly.js";
 import { OK, result, success } from "../helpers/result.js";
+import { formatFunctionDefinition } from "../type-command.js";
 import type { InterpreterContext } from "../types.js";
 import {
   parseArrayElements,
@@ -368,25 +369,22 @@ export async function handleDeclare(
 
   // Handle declare -f (function definitions)
   if (functionMode) {
-    if (processedArgs.length === 0) {
-      // List all function definitions - we don't store source, so just list names
-      let stdout = "";
-      const funcNames = Array.from(ctx.state.functions.keys()).sort();
-      for (const name of funcNames) {
-        // Without source tracking, we can't print the full definition
-        // Just print the function name declaration
-        stdout += `${name} ()\n{\n    # function body\n}\n`;
-      }
-      return success(stdout);
-    }
-    // Check if all specified functions exist (exit code is the main use case)
+    // Print definitions of the named functions, or of all functions (sorted)
+    const names =
+      processedArgs.length === 0
+        ? Array.from(ctx.state.functions.keys()).sort()
+        : processedArgs;
+    let stdout = "";
     let allExist = true;
-    for (const name of processedArgs) {
-      if (!ctx.state.functions.has(name)) {
+    for (const name of names) {
+      const funcDef = ctx.state.functions.get(name);
+      if (funcDef) {
+        stdout += formatFunctionDefinition(name, funcDef);
+      } else {
         allExist = false;
       }
     }
-    return result("", "", allExist ? 0 : 1);
+    return result(stdout, "", allExist ? 0 : 1);
   }
 
   // Print mode with specific variable names: declare -p varname

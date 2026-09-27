@@ -212,9 +212,12 @@ export function searchContent(
   // Fast path: count only mode
   if (countOnly || countMatches) {
     let matchCount = 0;
+    // -m N stops reading after N selected lines, so it caps the count too.
+    let selectedLines = 0;
     // --count --only-matching behaves like --count-matches
     const shouldCountMatches = (countMatches || onlyMatching) && !invertMatch;
     for (let i = 0; i < lastIdx; i++) {
+      if (maxCount > 0 && selectedLines >= maxCount) break;
       chargeWork();
       const line = lines[i];
       // Pre-filter: skip lines that can't contain any required literal.
@@ -226,6 +229,7 @@ export function searchContent(
       regex.lastIndex = 0;
       if (shouldCountMatches) {
         // Count individual matches on the line
+        const before = matchCount;
         for (
           let match = regex.exec(line);
           match !== null;
@@ -235,10 +239,12 @@ export function searchContent(
           matchCount++;
           if (match[0].length === 0) regex.lastIndex++;
         }
+        if (matchCount > before) selectedLines++;
       } else {
         // Count lines (with matches, or without matches if inverted)
         if (regex.test(line) !== invertMatch) {
           matchCount++;
+          selectedLines++;
         }
       }
     }
