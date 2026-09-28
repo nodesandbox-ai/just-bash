@@ -80,6 +80,9 @@ export function setFieldSeparator(ctx: AwkRuntimeContext, fs: string): void {
   ctx.FS = fs;
   if (fs === " ") {
     ctx.fieldSep = new ConstantRegex(/\s+/);
+  } else if (fs.length === 1) {
+    // POSIX: any other single character is a literal separator (FS="|").
+    ctx.fieldSep = createUserRegex(fs.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   } else {
     try {
       ctx.fieldSep = createUserRegex(fs);
