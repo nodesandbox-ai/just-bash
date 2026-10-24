@@ -73,6 +73,7 @@ import { isReadonly } from "./helpers/readonly.js";
 import { failure, OK, testResult } from "./helpers/result.js";
 import { SHELL_BUILTINS } from "./helpers/shell-constants.js";
 import { computeIndexedArrayIndex } from "./simple-command-assignments.js";
+import { shebangInterpreter } from "./subshell-group.js";
 import {
   findFirstInPath as findFirstInPathHelper,
   handleCommandV as handleCommandVHelper,
@@ -797,6 +798,24 @@ export async function executeExternalCommand(
         ctx.state.hashTable = new Map();
       }
       ctx.state.hashTable.set(commandName, resolved.path);
+    }
+    // A `#!` naming another interpreter (`#!/usr/bin/env node`) runs the
+    // script with it, as the kernel would: `node <script> <args>`.
+    let content: string | null = null;
+    try {
+      content = await ctx.fs.readFile(resolved.path);
+    } catch {
+      // executeUserScript reports the missing file
+    }
+    const interpreter = content === null ? null : shebangInterpreter(content);
+    if (interpreter) {
+      const interpreterArgs = [...interpreter.args, resolved.path, ...args];
+      return await dispatchCtx.runCommand(
+        interpreter.name,
+        interpreterArgs,
+        interpreterArgs.map(() => true),
+        stdin,
+      );
     }
     return await executeUserScript(resolved.path, args, stdin);
   }

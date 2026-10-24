@@ -320,6 +320,35 @@ async function executeGroupBody(
  */
 export type ExecuteScriptFn = (node: ScriptNode) => Promise<ExecResult>;
 
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "dash", "ksh", "zsh"]);
+
+/**
+ * The interpreter a script's `#!` line names, when it is not a shell:
+ * `#!/usr/bin/env node` and `#!/usr/bin/node` both give `node`, and
+ * `#!/usr/bin/env -S node --flag` gives `node` with `--flag`. Null for a
+ * shell (the script runs here as bash) or no `#!` line.
+ */
+export function shebangInterpreter(
+  content: string,
+): { name: string; args: string[] } | null {
+  if (!content.startsWith("#!")) return null;
+  const end = content.indexOf("\n");
+  const words = content
+    .slice(2, end === -1 ? undefined : end)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return null;
+  let rest = words;
+  if (rest[0].split("/").pop() === "env") {
+    rest = rest.slice(1);
+    if (rest[0] === "-S") rest = rest.slice(1);
+  }
+  const name = rest[0]?.split("/").pop();
+  if (!name || SHELL_INTERPRETERS.has(name)) return null;
+  return { name, args: rest.slice(1) };
+}
+
 /**
  * Execute a user script file found in PATH.
  * This handles executable files that don't have registered command handlers.
