@@ -40,6 +40,7 @@ import * as ExpParser from "./expansion-parser.js";
 import {
   isReservedWordToken,
   Lexer,
+  LexerError,
   type LexerOptions,
   type Token,
   TokenType,
@@ -1375,4 +1376,54 @@ export class Parser {
 export function parse(input: string, options?: LexerOptions): ScriptNode {
   const parser = new Parser();
   return parser.parse(input, options);
+}
+
+// A line ending in one of these goes on to the next, as in bash.
+const CONTINUING_OPERATORS = new Set<TokenType>([
+  TokenType.PIPE,
+  TokenType.PIPE_AMP,
+  TokenType.AND_AND,
+  TokenType.OR_OR,
+]);
+
+const endedEarly = (error: unknown): boolean =>
+  error instanceof ParseException
+    ? error.token?.type === TokenType.EOF ||
+      error.message.includes("unexpected EOF")
+    : error instanceof LexerError && error.message.includes("unexpected EOF");
+
+/**
+ * Whether `input` stops partway through a command, so that an interactive
+ * shell would read another line (its PS2 prompt) rather than run or reject
+ * it: an open quote, substitution or here-document, a compound command
+ * without its closing word, a trailing `|`, `|&`, `&&` or `||`, or a
+ * trailing backslash.
+ */
+export function isIncomplete(input: string, options?: LexerOptions): boolean {
+  let tokens: Token[];
+  try {
+    tokens = new Lexer(input, options).tokenize();
+  } catch (error) {
+    return endedEarly(error);
+  }
+  if (tokens.some((token) => token.heredocTerminated === false)) return true;
+  let last: Token | undefined;
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const type = tokens[i].type;
+    if (type !== TokenType.EOF && type !== TokenType.NEWLINE) {
+      last = tokens[i];
+      break;
+    }
+  }
+  if (last && CONTINUING_OPERATORS.has(last.type)) return true;
+  // An odd run of trailing backslashes escapes the newline, except in a
+  // comment.
+  const backslashes = input.length - input.replace(/\\+$/, "").length;
+  if (backslashes % 2 === 1 && last?.type !== TokenType.COMMENT) return true;
+  try {
+    parse(input, options);
+    return false;
+  } catch (error) {
+    return endedEarly(error);
+  }
 }

@@ -93,7 +93,7 @@ export {
   TooManyRedirectsError,
 } from "./network/index.js";
 // Parser
-export { parse } from "./parser/parser.js";
+export { isIncomplete, parse } from "./parser/parser.js";
 export type {
   CommandFinished as SandboxCommandFinished,
   OutputMessage,
