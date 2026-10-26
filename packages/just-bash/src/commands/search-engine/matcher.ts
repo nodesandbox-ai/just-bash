@@ -25,6 +25,25 @@ function preFilterMatches(preFilter: PreFilter, line: string): boolean {
   return false;
 }
 
+const utf8 = new TextEncoder();
+
+/**
+ * ripgrep's --max-columns: a printed line (with -o, a printed match) longer
+ * than `maxColumns` bytes is replaced by a marker. 0 means no limit.
+ */
+function fitColumns(
+  text: string,
+  maxColumns: number,
+  kind: "matching" | "context",
+): string {
+  // A UTF-16 code unit is at most 3 UTF-8 bytes, and never fewer than 1.
+  if (maxColumns <= 0 || text.length * 3 <= maxColumns) return text;
+  if (text.length <= maxColumns && utf8.encode(text).length <= maxColumns) {
+    return text;
+  }
+  return `[Omitted long ${kind} line]`;
+}
+
 /**
  * Apply a replacement pattern using capture groups from a regex match
  * Supports: $& (full match), $1-$9 (numbered groups), $<name> (named groups)
@@ -58,6 +77,8 @@ export interface SearchOptions {
   countMatches?: boolean;
   /** Filename prefix for output (empty string for no prefix) */
   filename?: string;
+  /** Follow the filename with NUL instead of ':' or '-' (--null) */
+  nullAfterFilename?: boolean;
   /** Show only the matching parts of lines */
   onlyMatching?: boolean;
   /** Print NUM lines of leading context */
@@ -80,6 +101,8 @@ export interface SearchOptions {
   passthru?: boolean;
   /** Enable multiline matching (patterns can span lines) */
   multiline?: boolean;
+  /** Omit printed lines longer than this many bytes (0 = no limit) */
+  maxColumns?: number;
   /** If \K was used, this is the capture group index containing the "real" match */
   kResetGroup?: number;
   /**
@@ -126,6 +149,7 @@ export function searchContent(
     countOnly = false,
     countMatches = false,
     filename = "",
+    nullAfterFilename = false,
     onlyMatching = false,
     beforeContext = 0,
     afterContext = 0,
@@ -137,6 +161,7 @@ export function searchContent(
     replace = null,
     passthru = false,
     multiline = false,
+    maxColumns = 0,
     kResetGroup,
     preFilter,
     maxWork,
@@ -152,6 +177,7 @@ export function searchContent(
       countOnly,
       countMatches,
       filename,
+      nullAfterFilename,
       onlyMatching,
       beforeContext,
       afterContext,
@@ -160,6 +186,7 @@ export function searchContent(
       showColumn,
       showByteOffset,
       replace,
+      maxColumns,
       kResetGroup,
       preFilter,
       maxWork,
@@ -168,6 +195,9 @@ export function searchContent(
     });
   }
 
+  // What follows a filename: NUL with --null, else the usual separator.
+  const after = (separator: string): string =>
+    nullAfterFilename ? "\0" : separator;
   let work = 0;
   const chargeWork = (amount = 1): void => {
     if (signal?.aborted) throw new ExecutionAbortedError();
@@ -249,7 +279,7 @@ export function searchContent(
       }
     }
     const countStr = filename
-      ? `${filename}:${matchCount}`
+      ? `${filename}${after(":")}${matchCount}`
       : String(matchCount);
     return { output: `${countStr}\n`, matched: matchCount > 0, matchCount };
   }
@@ -297,11 +327,14 @@ export function searchContent(
               kResetGroup !== undefined ? (match[kResetGroup] ?? "") : match[0];
             const matchText =
               replace !== null ? applyReplacement(replace, match) : rawMatch;
-            let prefix = filename ? `${filename}:` : "";
+            let prefix = filename ? `${filename}${after(":")}` : "";
             if (showByteOffset) prefix += `${byteOffset + match.index}:`;
             if (showLineNumbers) prefix += `${i + 1}:`;
             if (showColumn) prefix += `${match.index + 1}:`;
-            pushOutput(outputLines, prefix + matchText);
+            pushOutput(
+              outputLines,
+              prefix + fitColumns(matchText, maxColumns, "matching"),
+            );
             if (match[0].length === 0) regex.lastIndex++;
           }
         } else if (vimgrep) {
@@ -312,11 +345,14 @@ export function searchContent(
             match = regex.exec(line)
           ) {
             chargeWork();
-            let prefix = filename ? `${filename}:` : "";
+            let prefix = filename ? `${filename}${after(":")}` : "";
             if (showByteOffset) prefix += `${byteOffset + match.index}:`;
             if (showLineNumbers) prefix += `${i + 1}:`;
             if (showColumn) prefix += `${match.index + 1}:`;
-            pushOutput(outputLines, prefix + line);
+            pushOutput(
+              outputLines,
+              prefix + fitColumns(line, maxColumns, "matching"),
+            );
             if (match[0].length === 0) regex.lastIndex++;
           }
         } else {
@@ -351,12 +387,15 @@ export function searchContent(
             });
           }
 
-          let prefix = filename ? `${filename}:` : "";
+          let prefix = filename ? `${filename}${after(":")}` : "";
           if (showByteOffset)
             prefix += `${byteOffset + (firstMatch ? firstMatch.index : 0)}:`;
           if (showLineNumbers) prefix += `${i + 1}:`;
           if (showColumn) prefix += `${column}:`;
-          pushOutput(outputLines, prefix + outputLine);
+          pushOutput(
+            outputLines,
+            prefix + fitColumns(outputLine, maxColumns, "matching"),
+          );
         }
       }
 
@@ -397,9 +436,12 @@ export function searchContent(
       // Separator: : for matches, - for non-matches
       const sep = isMatch ? ":" : "-";
 
-      let prefix = filename ? `${filename}${sep}` : "";
+      let prefix = filename ? `${filename}${after(sep)}` : "";
       if (showLineNumbers) prefix += `${i + 1}${sep}`;
-      pushOutput(outputLines, prefix + line);
+      pushOutput(
+        outputLines,
+        prefix + fitColumns(line, maxColumns, isMatch ? "matching" : "context"),
+      );
     }
 
     return {
@@ -460,9 +502,9 @@ export function searchContent(
       if (!printedLines.has(i)) {
         printedLines.add(i);
         lastPrintedLine = i;
-        let outputLine = lines[i];
+        let outputLine = fitColumns(lines[i], maxColumns, "context");
         if (showLineNumbers) outputLine = `${i + 1}-${outputLine}`;
-        if (filename) outputLine = `${filename}-${outputLine}`;
+        if (filename) outputLine = `${filename}${after("-")}${outputLine}`;
         pushOutput(outputLines, outputLine);
       }
     }
@@ -485,16 +527,19 @@ export function searchContent(
           const rawMatch =
             kResetGroup !== undefined ? (match[kResetGroup] ?? "") : match[0];
           const matchText = replace !== null ? replace : rawMatch;
-          let prefix = filename ? `${filename}:` : "";
+          let prefix = filename ? `${filename}${after(":")}` : "";
           if (showLineNumbers) prefix += `${lineNum + 1}:`;
           if (showColumn) prefix += `${match.index + 1}:`;
-          pushOutput(outputLines, prefix + matchText);
+          pushOutput(
+            outputLines,
+            prefix + fitColumns(matchText, maxColumns, "matching"),
+          );
           if (match[0].length === 0) regex.lastIndex++;
         }
       } else {
-        let outputLine = line;
+        let outputLine = fitColumns(line, maxColumns, "matching");
         if (showLineNumbers) outputLine = `${lineNum + 1}:${outputLine}`;
-        if (filename) outputLine = `${filename}:${outputLine}`;
+        if (filename) outputLine = `${filename}${after(":")}${outputLine}`;
         pushOutput(outputLines, outputLine);
       }
     }
@@ -506,9 +551,9 @@ export function searchContent(
       if (!printedLines.has(i)) {
         printedLines.add(i);
         lastPrintedLine = i;
-        let outputLine = lines[i];
+        let outputLine = fitColumns(lines[i], maxColumns, "context");
         if (showLineNumbers) outputLine = `${i + 1}-${outputLine}`;
-        if (filename) outputLine = `${filename}-${outputLine}`;
+        if (filename) outputLine = `${filename}${after("-")}${outputLine}`;
         pushOutput(outputLines, outputLine);
       }
     }
@@ -534,6 +579,7 @@ function searchContentMultiline(
     countOnly: boolean;
     countMatches: boolean;
     filename: string;
+    nullAfterFilename: boolean;
     onlyMatching: boolean;
     beforeContext: number;
     afterContext: number;
@@ -542,6 +588,7 @@ function searchContentMultiline(
     showColumn: boolean;
     showByteOffset: boolean;
     replace: string | null;
+    maxColumns: number;
     kResetGroup?: number;
     preFilter?: PreFilter | null;
     maxWork?: number;
@@ -555,6 +602,7 @@ function searchContentMultiline(
     countOnly,
     countMatches,
     filename,
+    nullAfterFilename,
     onlyMatching,
     beforeContext,
     afterContext,
@@ -563,12 +611,15 @@ function searchContentMultiline(
     showColumn,
     showByteOffset,
     replace,
+    maxColumns,
     kResetGroup,
     preFilter,
     maxWork,
     maxMatches,
     signal,
   } = options;
+  const after = (separator: string): string =>
+    nullAfterFilename ? "\0" : separator;
 
   let work = 0;
   const chargeWork = (amount = 1): void => {
@@ -586,7 +637,7 @@ function searchContentMultiline(
   // Only safe when not inverting — an invert-match scan must check every line.
   if (preFilter && !invertMatch && !preFilterMatches(preFilter, content)) {
     if (countOnly || countMatches) {
-      const countStr = filename ? `${filename}:0` : "0";
+      const countStr = filename ? `${filename}${after(":")}0` : "0";
       return { output: `${countStr}\n`, matched: false, matchCount: 0 };
     }
     return { output: "", matched: false, matchCount: 0 };
@@ -674,7 +725,7 @@ function searchContentMultiline(
         ? lastIdx - matchedLineCount
         : matchedLineCount;
     const countStr = filename
-      ? `${filename}:${matchCount}`
+      ? `${filename}${after(":")}${matchCount}`
       : String(matchCount);
     return { output: `${countStr}\n`, matched: matchCount > 0, matchCount };
   }
@@ -736,9 +787,9 @@ function searchContentMultiline(
     for (let i = 0; i < lastIdx; i++) {
       chargeWork();
       if (!matchedLines.has(i)) {
-        let line = lines[i];
+        let line = fitColumns(lines[i], maxColumns, "matching");
         if (showLineNumbers) line = `${i + 1}:${line}`;
-        if (filename) line = `${filename}:${line}`;
+        if (filename) line = `${filename}${after(":")}${line}`;
         outputLines.push(line);
       }
     }
@@ -776,9 +827,9 @@ function searchContentMultiline(
       if (!printedLines.has(i)) {
         printedLines.add(i);
         lastPrintedLine = i;
-        let line = lines[i];
+        let line = fitColumns(lines[i], maxColumns, "context");
         if (showLineNumbers) line = `${i + 1}-${line}`;
-        if (filename) line = `${filename}-${line}`;
+        if (filename) line = `${filename}${after("-")}${line}`;
         outputLines.push(line);
       }
     }
@@ -787,11 +838,11 @@ function searchContentMultiline(
     if (onlyMatching) {
       // Output only the matched text
       const matchText = replace !== null ? replace : span.matchText;
-      let prefix = filename ? `${filename}:` : "";
+      let prefix = filename ? `${filename}${after(":")}` : "";
       if (showByteOffset) prefix += `${span.byteOffset}:`;
       if (showLineNumbers) prefix += `${span.startLine + 1}:`;
       if (showColumn) prefix += `${span.column}:`;
-      outputLines.push(prefix + matchText);
+      outputLines.push(prefix + fitColumns(matchText, maxColumns, "matching"));
       // Mark lines as printed to handle context correctly
       for (let i = span.startLine; i <= span.endLine; i++) {
         chargeWork();
@@ -811,12 +862,12 @@ function searchContentMultiline(
             regex.lastIndex = 0;
             line = regex.replace(line, replace);
           }
-          let prefix = filename ? `${filename}:` : "";
+          let prefix = filename ? `${filename}${after(":")}` : "";
           if (showByteOffset && i === span.startLine)
             prefix += `${span.byteOffset}:`;
           if (showLineNumbers) prefix += `${i + 1}:`;
           if (showColumn && i === span.startLine) prefix += `${span.column}:`;
-          outputLines.push(prefix + line);
+          outputLines.push(prefix + fitColumns(line, maxColumns, "matching"));
         }
       }
     }
@@ -827,9 +878,9 @@ function searchContentMultiline(
       if (!printedLines.has(i)) {
         printedLines.add(i);
         lastPrintedLine = i;
-        let line = lines[i];
+        let line = fitColumns(lines[i], maxColumns, "context");
         if (showLineNumbers) line = `${i + 1}-${line}`;
-        if (filename) line = `${filename}-${line}`;
+        if (filename) line = `${filename}${after("-")}${line}`;
         outputLines.push(line);
       }
     }

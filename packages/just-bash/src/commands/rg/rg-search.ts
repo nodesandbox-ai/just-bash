@@ -26,6 +26,7 @@ import {
 } from "../search-engine/index.js";
 import { FileTypeRegistry } from "./file-types.js";
 import { GitignoreManager, loadGitignores } from "./gitignore.js";
+import { jsonFileMessages } from "./rg-json.js";
 import type { RgOptions } from "./rg-options.js";
 
 /**
@@ -330,14 +331,15 @@ export async function executeSearch(
   // Default to current directory
   const paths = inputPaths.length === 0 ? ["."] : inputPaths;
 
-  // Load gitignore files
+  // Load gitignore files. As in ripgrep, --no-ignore leaves the files named
+  // with --ignore-file in force.
   let gitignore: GitignoreManager | null = null;
-  if (!options.noIgnore) {
+  if (!options.noIgnore || options.ignoreFiles.length > 0) {
     gitignore = await loadGitignores(
       ctx.fs,
       ctx.cwd,
-      options.noIgnoreDot,
-      options.noIgnoreVcs,
+      options.noIgnore || options.noIgnoreDot,
+      options.noIgnore || options.noIgnoreVcs,
       options.ignoreFiles,
     );
   }
@@ -508,6 +510,25 @@ async function collectFiles(
     }
   }
 
+  if (options.sort === "modified") {
+    // Oldest first, as ripgrep sorts; the path breaks ties.
+    const modified = new Map<string, number>();
+    for (const file of files) {
+      traversalBudget.checkpoint();
+      try {
+        const stat = await ctx.fs.stat(ctx.fs.resolvePath(ctx.cwd, file));
+        modified.set(file, stat.mtime.getTime());
+      } catch (error) {
+        rethrowFatalExecutionError(error);
+        modified.set(file, 0);
+      }
+    }
+    files.sort(
+      (a, b) =>
+        (modified.get(a) ?? 0) - (modified.get(b) ?? 0) ||
+        (a < b ? -1 : a > b ? 1 : 0),
+    );
+  }
   const sortedFiles = options.sort === "path" ? files.sort() : files;
 
   return {
@@ -882,14 +903,15 @@ async function listFiles(
   inputPaths: string[],
   options: RgOptions,
 ): Promise<ExecResult> {
-  // Load gitignore files
+  // Load gitignore files. As in ripgrep, --no-ignore leaves the files named
+  // with --ignore-file in force.
   let gitignore: GitignoreManager | null = null;
-  if (!options.noIgnore) {
+  if (!options.noIgnore || options.ignoreFiles.length > 0) {
     gitignore = await loadGitignores(
       ctx.fs,
       ctx.cwd,
-      options.noIgnoreDot,
-      options.noIgnoreVcs,
+      options.noIgnore || options.noIgnoreDot,
+      options.noIgnore || options.noIgnoreVcs,
       options.ignoreFiles,
     );
   }
@@ -1098,24 +1120,6 @@ function compositeLease(
 /**
  * Format a single match for JSON output
  */
-interface JsonSubmatch {
-  match: { text: string };
-  start: number;
-  end: number;
-  replacement?: { text: string };
-}
-
-interface JsonMatch {
-  type: "match";
-  data: {
-    path: { text: string };
-    lines: { text: string };
-    line_number: number;
-    absolute_offset: number;
-    submatches: JsonSubmatch[];
-  };
-}
-
 /**
  * Search files and produce output
  */
@@ -1134,6 +1138,8 @@ async function searchFiles(
   // JSON mode tracking
   const jsonMessages: string[] = [];
   let totalMatches = 0;
+  let matchedLines = 0;
+  let jsonMatches = 0;
   let filesWithMatch = 0;
   let bytesSearched = 0;
 
@@ -1167,6 +1173,7 @@ async function searchFiles(
             countOnly: options.count,
             countMatches: options.countMatches,
             filename: filenameForSearch,
+            nullAfterFilename: options.nullSeparator,
             onlyMatching: options.onlyMatching,
             beforeContext: options.beforeContext,
             afterContext: options.afterContext,
@@ -1181,6 +1188,7 @@ async function searchFiles(
                 : null,
             passthru: options.passthru,
             multiline: options.multiline,
+            maxColumns: options.maxColumns,
             kResetGroup,
             maxWork: ctx.limits.maxLoopIterations,
             maxMatches: ctx.limits.maxArrayElements,
@@ -1220,70 +1228,20 @@ async function searchFiles(
         if (options.json && !options.quiet) {
           // JSON mode without quiet: output begin/match/end messages
           const content = (res as { content?: string }).content || "";
-          jsonMessages.push(
-            JSON.stringify({ type: "begin", data: { path: { text: file } } }),
-          );
-
-          // Find matches and output them
-          const lines = content.split("\n");
-          regex.lastIndex = 0;
-          let lineOffset = 0;
-          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-            const line = lines[lineIdx];
-            regex.lastIndex = 0;
-            const submatches: JsonSubmatch[] = [];
-
-            for (
-              let match = regex.exec(line);
-              match !== null;
-              match = regex.exec(line)
-            ) {
-              const submatch: JsonSubmatch = {
-                match: { text: match[0] },
-                start: match.index,
-                end: match.index + match[0].length,
-              };
-              if (options.replace !== null) {
-                submatch.replacement = { text: options.replace };
-              }
-              submatches.push(submatch);
-              if (match[0].length === 0) regex.lastIndex++;
-            }
-
-            if (submatches.length > 0) {
-              const matchMsg: JsonMatch = {
-                type: "match",
-                data: {
-                  path: { text: file },
-                  lines: { text: `${line}\n` },
-                  line_number: lineIdx + 1,
-                  absolute_offset: lineOffset,
-                  submatches,
-                },
-              };
-              jsonMessages.push(JSON.stringify(matchMsg));
-            }
-            lineOffset += line.length + 1;
-          }
-
-          jsonMessages.push(
-            JSON.stringify({
-              type: "end",
-              data: {
-                path: { text: file },
-                binary_offset: null,
-                stats: {
-                  elapsed: { secs: 0, nanos: 0, human: "0s" },
-                  searches: 1,
-                  searches_with_match: 1,
-                  bytes_searched: content.length,
-                  bytes_printed: 0,
-                  matched_lines: result.matchCount,
-                  matches: result.matchCount,
-                },
-              },
-            }),
-          );
+          const json = jsonFileMessages(file, content, regex, {
+            invertMatch: options.invertMatch,
+            multiline: options.multiline,
+            beforeContext: options.beforeContext,
+            afterContext: options.afterContext,
+            maxCount: options.maxCount,
+            replace: options.replace,
+            maxWork: ctx.limits.maxLoopIterations,
+            maxMatches: ctx.limits.maxArrayElements,
+            signal: ctx.signal,
+          });
+          for (const message of json.messages) jsonMessages.push(message);
+          matchedLines += json.matchedLines;
+          jsonMatches += json.matches;
         } else if (options.filesWithMatches) {
           const sep = options.nullSeparator ? "\0" : "\n";
           stdout += `${file}${sep}`;
@@ -1320,8 +1278,8 @@ async function searchFiles(
             searches_with_match: filesWithMatch,
             bytes_searched: bytesSearched,
             bytes_printed: 0,
-            matched_lines: totalMatches,
-            matches: totalMatches,
+            matched_lines: matchedLines,
+            matches: jsonMatches,
           },
         },
       }),

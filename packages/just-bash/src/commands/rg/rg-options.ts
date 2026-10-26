@@ -25,6 +25,8 @@ export interface RgOptions {
   stats: boolean;
   onlyMatching: boolean;
   maxCount: number;
+  /** Omit printed lines longer than this many bytes (0 = no limit). */
+  maxColumns: number;
   lineNumber: boolean;
   noFilename: boolean;
   withFilename: boolean;
@@ -40,7 +42,7 @@ export interface RgOptions {
   heading: boolean;
   passthru: boolean;
   includeZero: boolean;
-  sort: "path" | "none";
+  sort: "path" | "modified" | "none";
   json: boolean;
 
   // File selection
@@ -86,6 +88,7 @@ export function createDefaultOptions(): RgOptions {
     stats: false,
     onlyMatching: false,
     maxCount: 0,
+    maxColumns: 0,
     lineNumber: true,
     noFilename: false,
     withFilename: false,

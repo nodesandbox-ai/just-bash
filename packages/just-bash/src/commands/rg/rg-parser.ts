@@ -120,6 +120,13 @@ const VALUE_OPTS: ValueOptDef[] = [
   { long: "type-add", target: "typeAdd", multi: true },
   { long: "type-clear", target: "typeClear", multi: true },
   { short: "m", long: "max-count", target: "maxCount", parse: parseInt },
+  {
+    short: "M",
+    long: "max-columns",
+    target: "maxColumns",
+    parse: (value) => Number(value),
+    validate: (value) => validateNonnegativeInteger("max-columns", value),
+  },
   { short: "e", long: "regexp", target: "patterns", multi: true },
   { short: "f", long: "file", target: "patternFiles", multi: true },
   { short: "r", long: "replace", target: "replace" },
@@ -438,6 +445,8 @@ const BOOL_FLAGS = new Map<string, BoolFlagHandler>([
       o.json = true;
     },
   ],
+  // There is no ripgrep config file (RIPGREP_CONFIG_PATH) to skip.
+  ["--no-config", () => {}],
 
   // File selection
   [
@@ -617,25 +626,29 @@ function applyValueOpt(
   return undefined;
 }
 
+function isSortKind(value: string): value is RgOptions["sort"] {
+  return value === "path" || value === "modified" || value === "none";
+}
+
 /**
  * Parse sort option
  */
 function parseSort(
   args: string[],
   i: number,
-): { value: "path" | "none"; newIndex: number } | null {
+): { value: RgOptions["sort"]; newIndex: number } | null {
   const arg = args[i];
 
   if (arg === "--sort" && i + 1 < args.length) {
     const val = args[i + 1];
-    if (val === "path" || val === "none") {
+    if (isSortKind(val)) {
       return { value: val, newIndex: i + 1 };
     }
   }
 
   if (arg.startsWith("--sort=")) {
     const val = arg.slice("--sort=".length);
-    if (val === "path" || val === "none") {
+    if (isSortKind(val)) {
       return { value: val, newIndex: i };
     }
   }
